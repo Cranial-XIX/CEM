@@ -12,11 +12,11 @@ class VAE(nn.Module):
     def __init__(self):
         super(VAE, self).__init__()
 
-        self.fc1 = nn.Linear(dim_theta, 100)
-        self.fc21 = nn.Linear(100, 10)
-        self.fc22 = nn.Linear(100, 10)
-        self.fc3 = nn.Linear(10, 100)
-        self.fc4 = nn.Linear(100, dim_theta)
+        self.fc1 = nn.Linear(dim_theta, dim_vae_hidden)
+        self.fc21 = nn.Linear(dim_vae_hidden, dim_vae_lower)
+        self.fc22 = nn.Linear(dim_vae_hidden, dim_vae_lower)
+        self.fc3 = nn.Linear(dim_vae_lower, dim_vae_hidden)
+        self.fc4 = nn.Linear(dim_vae_hidden, dim_theta)
 
         self.relu = nn.ReLU()
 
@@ -40,30 +40,6 @@ class VAE(nn.Module):
         mu, logvar = self.encode(th)
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
-
-
-class LB(nn.Module):
-    def __init__(self):
-        super(LB, self).__init__()
-
-        self.fc1 = nn.Linear(dim_theta, 100)
-        self.fc2 = nn.Linear(100, 10)
-        self.fc3 = nn.Linear(10, 100)
-        self.fc4 = nn.Linear(100, dim_theta)
-
-        self.relu = nn.ReLU()
-
-    def encode(self, th):
-        h1 = self.relu(self.fc1(th))
-        return self.fc2(h1)
-
-    def decode(self, z):
-        h3 = self.relu(self.fc3(z))
-        return self.fc4(h3)
-
-    def forward(self, th):
-        z = self.encode(th)
-        return self.decode(z), z
 
 
 def loss_function2(recon_th, th, z, r):
@@ -131,6 +107,9 @@ dim_act = act_space.shape[0]
 dim_h1 = int(np.sqrt(dim_obs * dim_act))
 dim_theta = (dim_obs + 1) * dim_h1 + (dim_h1 + 1) * dim_act
 
+dim_vae_lower = 10
+dim_vae_hidden = int(np.sqrt(dim_theta * dim_vae_lower))
+
 n_iter = 20
 batch_size = 20
 elite_frac = 0.2
@@ -147,15 +126,15 @@ def vae_train():
     R = []
 
     for i in xrange(n_iter):
-        model.train()
-
-        thetas = model.decode(Variable(torch.randn(batch_size, 10))).data.numpy()
+        model.eval()
+        thetas = model.decode(Variable(torch.randn(batch_size, dim_vae_lower))).data.numpy()
         rewards = np.array(map(noisy_evaluation, thetas))
         elite_inds = rewards.argsort()[-n_elite:]
         elite_thetas = Variable(torch.from_numpy(thetas[elite_inds]), requires_grad=False)
         elite_rewards = rewards[elite_inds]
 
         optimizer.zero_grad()
+        model.train()
         recon_batch, mu, logvar = model(elite_thetas)
         loss = loss_function(recon_batch, elite_thetas, mu, logvar)
         loss.backward()
@@ -165,27 +144,36 @@ def vae_train():
         print "iteration {} mean rewards {} loss {}".format(i, np.mean(elite_rewards), loss.data[0])
     return R
 
-def lb_train():
-    model = LB()
+def vae_buffer_train():
+    model = VAE()
+    t = 0
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     R = []
+    n_buffer = batch_size // 2
+    theta_buffer = np.zeros((n_buffer, dim_theta))
+    reward_buffer = np.zeros(n_buffer) - 10
     for i in xrange(n_iter):
-        model.train()
-
-        thetas = model.decode(Variable(torch.randn(batch_size, 10))).data.numpy()
+        model.eval()
+        thetas = model.decode(Variable(torch.randn(batch_size, dim_vae_lower))).data.numpy()
         rewards = np.array(map(noisy_evaluation, thetas))
-        elite_inds = rewards.argsort()[-n_elite:]
-        elite_thetas = Variable(torch.from_numpy(thetas[elite_inds]), requires_grad=False)
-        elite_rewards = rewards[elite_inds]
+        thetas = np.concatenate((thetas, theta_buffer))
+        rewards = np.concatenate((rewards, reward_buffer))
 
+        elite_inds = rewards.argsort()[-n_elite:]
+
+        reward_buffer = rewards[elite_inds[-n_buffer:]]
+        theta_buffer = thetas[elite_inds[-n_buffer:]]
+
+        elite_thetas = Variable(torch.from_numpy(thetas[elite_inds]).float(), requires_grad=False)
+        model.train()
         optimizer.zero_grad()
-        recon_batch, z = model(elite_thetas)
-        loss = loss_function2(recon_batch, elite_thetas, z, Variable(torch.from_numpy(elite_rewards), requires_grad=False))
+        recon_batch, mu, logvar = model(elite_thetas)
+        loss = loss_function(recon_batch, elite_thetas, mu, logvar)
         loss.backward()
         optimizer.step()
 
-        R.append(np.mean(elite_rewards))
-        print "iteration {} mean rewards {} loss {}".format(i, np.mean(elite_rewards), loss.data[0])
+        R.append(np.mean(reward_buffer))
+        print "iteration {} mean rewards {} loss {}".format(i, np.mean(reward_buffer), loss.data[0])
     return R
 
 def cem():
@@ -274,7 +262,7 @@ def beam_cem():
         max_mean_rewards.append(max(r1, r2))
         print "Iteration %i. R1:%5.3g R2:%5.3g" % (i+1, r1, r2)
     return np.array(max_mean_rewards)
-
+'''
 n_seed = 3
 
 bc = np.zeros(n_iter)
@@ -302,31 +290,36 @@ plt.xticks(np.arange(0, 20, 1))
 plt.title(env_name)
 plt.show()
 '''
-n_seed = 5
 
-mu_vae = np.zeros(n_iter)
-mu_lb = np.zeros(n_iter)
+n_seed = 3
+
+vaeb = np.zeros(n_iter)
+vae = np.zeros(n_iter)
+ce = np.zeros(n_iter)
 
 
 for i in xrange(n_seed):
     np.random.seed(i)
-    mu_vae += vae_train()
-    mu_lb += lb_train()
+    vae += vae_train()
+    vaeb += vae_buffer_train()
+    ce += cem()
     print "iteration ", i
 
-mu_lb /= n_seed
-mu_vae /= n_seed
+vae /= n_seed
+vaeb /= n_seed
+ce /= n_seed
 
 fig = plt.figure()
 ax = fig.add_subplot(111)
 ax.set_xlabel('iteration')
 ax.set_ylabel('rewards')
 x = range(n_iter)
-a, = plt.plot(x, mu_vae, label='vae')
-b, = plt.plot(x, mu_lb, label='vae w/mean')
-plt.legend(handles=[a, b])
+a, = plt.plot(x, vae, label='vae')
+b, = plt.plot(x, vaeb, label='vae w/buffer')
+c, = plt.plot(x, ce, label='cem')
+plt.legend(handles=[a, b, c])
 
-plt.xticks(np.arange(0, 100, 10))
+plt.xticks(np.arange(0, 20, 1))
 plt.title(env_name)
 plt.show()
-'''
+

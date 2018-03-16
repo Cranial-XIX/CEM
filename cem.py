@@ -75,7 +75,7 @@ class ContinuousNeuralPolicy(object):
 
 # =============================================================================
 
-def discount_rollout(policy, env, num_steps, discount=0.9, render=False):
+def discount_rollout(policy, env, num_steps=100, discount=0.9, render=False):
     o = env.reset()
     rewards = []
     steps = 0
